@@ -1,10 +1,10 @@
 import { useMemo, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { parsePhoneNumberFromString, AsYouType } from 'libphonenumber-js'
 
 import { INDONESIA_BTS_REFERENCE } from './data/btsReference'
-import { lookupPhoneOrigin, approximateCoordinatesFor, normalizePhone } from './data/phonePrefix'
+import { approximateCoordinatesFor } from './data/phonePrefix'
 import { nearestBts, haversineKm } from './lib/geo'
+import { usePhoneLookup } from './hooks/usePhoneLookup'
 import { ModeTabs } from './components/ModeTabs'
 import { PhoneInfoCard } from './components/PhoneInfoCard'
 import { ScanPanel } from './components/ScanPanel'
@@ -14,32 +14,31 @@ export default function App() {
   const [phoneRaw, setPhoneRaw] = useState('')
   const [gpsState, setGpsState] = useState({ status: 'idle', point: null, error: null })
 
-  const phoneFormatted = useMemo(() => {
-    if (!phoneRaw) return ''
-    const t = new AsYouType('ID')
-    return t.input(phoneRaw)
-  }, [phoneRaw])
+  const lookup = usePhoneLookup(phoneRaw)
+  const { prefixData, apiData, formatted } = lookup
 
-  const phoneValid = useMemo(() => {
-    if (!phoneRaw) return false
-    const parsed = parsePhoneNumberFromString(phoneRaw, 'ID')
-    return !!(parsed && parsed.isValid())
-  }, [phoneRaw])
+  // Determine effective operator for highlighting nearest BTS card.
+  const effectiveOperator = apiData?.carrier ?? prefixData?.operator ?? null
 
-  const phoneOrigin = useMemo(() => lookupPhoneOrigin(phoneRaw), [phoneRaw])
-  const phonePoint  = useMemo(
-    () => approximateCoordinatesFor(phoneOrigin, INDONESIA_BTS_REFERENCE),
-    [phoneOrigin]
-  )
+  // Approximate coordinates: prefer API location if it returned a city name.
+  const phonePoint = useMemo(() => {
+    // If AbstractAPI returned a real city (not just "Indonesia"), try to match it in BTS list.
+    if (apiData?.location && apiData.location !== 'Indonesia') {
+      const btsByCity = INDONESIA_BTS_REFERENCE.filter(
+        (b) => b.city.toLowerCase() === apiData.location.toLowerCase()
+      )
+      if (btsByCity.length > 0) {
+        const lat = btsByCity.reduce((s, b) => s + b.lat, 0) / btsByCity.length
+        const lon = btsByCity.reduce((s, b) => s + b.lon, 0) / btsByCity.length
+        return { lat, lon }
+      }
+    }
+    // Fall back to prefix-table estimated city.
+    return approximateCoordinatesFor(prefixData, INDONESIA_BTS_REFERENCE)
+  }, [apiData, prefixData])
 
-  const phoneNearest = useMemo(
-    () => nearestBts(phonePoint, INDONESIA_BTS_REFERENCE, 5),
-    [phonePoint]
-  )
-  const gpsNearest = useMemo(
-    () => nearestBts(gpsState.point, INDONESIA_BTS_REFERENCE, 5),
-    [gpsState.point]
-  )
+  const phoneNearest = useMemo(() => nearestBts(phonePoint, INDONESIA_BTS_REFERENCE, 5), [phonePoint])
+  const gpsNearest   = useMemo(() => nearestBts(gpsState.point, INDONESIA_BTS_REFERENCE, 5), [gpsState.point])
 
   const showPhone   = mode === 'phone'   || mode === 'compare'
   const showGps     = mode === 'gps'     || mode === 'compare'
@@ -49,7 +48,7 @@ export default function App() {
     if (!showCompare) return null
     const distance = haversineKm(phonePoint, gpsState.point)
     const phoneOp = phoneNearest[0]?.operator
-    const gpsOp = gpsNearest[0]?.operator
+    const gpsOp   = gpsNearest[0]?.operator
     return {
       distanceKm: distance,
       isLocationMismatch: distance > 50,
@@ -66,53 +65,40 @@ export default function App() {
     }
     setGpsState({ status: 'loading', point: null, error: null })
     navigator.geolocation.getCurrentPosition(
-      (pos) => setGpsState({
-        status: 'ok',
-        point: { lat: pos.coords.latitude, lon: pos.coords.longitude },
-        error: null,
-      }),
+      (pos) => setGpsState({ status: 'ok', point: { lat: pos.coords.latitude, lon: pos.coords.longitude }, error: null }),
       (err) => setGpsState({ status: 'error', point: null, error: err.message }),
       { enableHighAccuracy: true, timeout: 15000 }
     )
   }
 
-  function useDemoLocation(city) {
-    const samples = {
+  function useDemoGps(city) {
+    const coords = {
       Jakarta:    { lat: -6.2088, lon: 106.8456 },
       Bandung:    { lat: -6.9175, lon: 107.6191 },
       Surabaya:   { lat: -7.2575, lon: 112.7521 },
       Yogyakarta: { lat: -7.7956, lon: 110.3695 },
       Denpasar:   { lat: -8.6705, lon: 115.2126 },
     }
-    setGpsState({ status: 'ok', point: samples[city], error: null })
+    setGpsState({ status: 'ok', point: coords[city], error: null })
   }
 
   return (
     <div className="min-h-screen text-slate-100">
       <Header />
 
-      <main className="max-w-5xl mx-auto px-4 sm:px-6 py-6 sm:py-8 space-y-6">
+      <main className="max-w-5xl mx-auto px-4 sm:px-6 py-6 sm:py-8 space-y-5">
         <ModeTabs mode={mode} onChange={setMode} />
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {(mode === 'phone' || mode === 'compare') && (
-            <PhoneInputSection
-              phoneRaw={phoneRaw}
-              setPhoneRaw={setPhoneRaw}
-              phoneFormatted={phoneFormatted}
-              phoneValid={phoneValid}
-              phoneOrigin={phoneOrigin}
-            />
+          {showPhone && (
+            <PhoneInputSection phoneRaw={phoneRaw} setPhoneRaw={setPhoneRaw} lookup={lookup} />
           )}
-          {(mode === 'gps' || mode === 'compare') && (
-            <GpsSection
-              gpsState={gpsState}
-              onRequest={requestGps}
-              onDemo={useDemoLocation}
-            />
+          {showGps && (
+            <GpsSection gpsState={gpsState} onRequest={requestGps} onDemo={useDemoGps} />
           )}
         </div>
 
+        {/* Mismatch banner */}
         <AnimatePresence>
           {mismatch && (mismatch.isLocationMismatch || mismatch.operatorMismatch) && (
             <motion.div
@@ -126,12 +112,12 @@ export default function App() {
               <ul className="mt-1 text-amber-200/80 list-disc list-inside space-y-0.5">
                 {mismatch.isLocationMismatch && (
                   <li>
-                    Phone origin and device GPS are ~{mismatch.distanceKm.toFixed(0)} km apart.
+                    Phone origin vs device GPS ~{mismatch.distanceKm.toFixed(0)} km apart.
                   </li>
                 )}
                 {mismatch.operatorMismatch && (
                   <li>
-                    Nearest operator differs — phone area: <b>{mismatch.phoneOp}</b>, GPS area: <b>{mismatch.gpsOp}</b>.
+                    Nearest operator berbeda — phone area: <b>{mismatch.phoneOp}</b>, GPS area: <b>{mismatch.gpsOp}</b>.
                   </li>
                 )}
               </ul>
@@ -139,30 +125,31 @@ export default function App() {
           )}
         </AnimatePresence>
 
+        {/* BTS panels */}
         <div className={`grid gap-4 ${mode === 'compare' ? 'md:grid-cols-2' : 'grid-cols-1'}`}>
           {showPhone && (
             <ScanPanel
               title="Panel A · Phone-traced BTS"
               subtitle={
-                phoneOrigin?.city
-                  ? `Top 5 BTS near estimated origin: ${phoneOrigin.city}`
-                  : 'Enter a phone number to trace'
+                phonePoint
+                  ? `Top 5 BTS terdekat — ${apiData?.location && apiData.location !== 'Indonesia' ? apiData.location : prefixData?.city ?? 'estimasi'}`
+                  : phoneRaw
+                  ? 'Tidak bisa estimasi lokasi dari nomor ini'
+                  : 'Masukkan nomor HP untuk trace'
               }
               accent="emerald"
               point={phonePoint}
               btsList={phoneNearest}
-              highlightTopOperator={phoneOrigin?.operator}
+              highlightTopOperator={effectiveOperator}
             />
           )}
           {showGps && (
             <ScanPanel
               title="Panel B · GPS device BTS"
               subtitle={
-                gpsState.status === 'ok'
-                  ? 'Top 5 BTS near your device'
-                  : gpsState.status === 'loading'
-                  ? 'Locating…'
-                  : 'Use real GPS or pick a demo city'
+                gpsState.status === 'ok'      ? 'Top 5 BTS terdekat device Anda' :
+                gpsState.status === 'loading' ? 'Mendapatkan lokasi…' :
+                'Gunakan GPS asli atau pilih kota demo'
               }
               accent="amber"
               point={gpsState.point}
@@ -194,39 +181,41 @@ function Header() {
             <div className="text-[11px] text-slate-500">GPS · Phone trace · Operator insight</div>
           </div>
         </div>
-        <span className="text-[11px] text-amber-300/80 px-2 py-1 rounded-md border border-amber-400/30 bg-amber-400/5">
-          Demo data
-        </span>
+        <ApiKeyBadge />
       </div>
     </header>
   )
 }
 
-function PhoneInputSection({ phoneRaw, setPhoneRaw, phoneFormatted, phoneValid, phoneOrigin }) {
-  const normalized = normalizePhone(phoneRaw)
+function ApiKeyBadge() {
+  const hasKey = Boolean(import.meta.env.VITE_ABSTRACT_API_KEY)
+  return hasKey ? (
+    <span className="text-[11px] text-emerald-300/90 px-2 py-1 rounded-md border border-emerald-400/30 bg-emerald-400/5">
+      AbstractAPI active
+    </span>
+  ) : (
+    <span className="text-[11px] text-amber-300/80 px-2 py-1 rounded-md border border-amber-400/30 bg-amber-400/5">
+      Prefix only — no API key
+    </span>
+  )
+}
+
+function PhoneInputSection({ phoneRaw, setPhoneRaw, lookup }) {
   return (
     <section className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4 sm:p-5 space-y-3">
-      <div>
-        <label className="block text-xs uppercase tracking-wider text-emerald-300/80 mb-2">
-          Trace phone number location
-        </label>
-        <input
-          type="tel"
-          inputMode="tel"
-          autoComplete="off"
-          placeholder="+62 812 3456 7890  or  0812-3456-7890"
-          value={phoneRaw}
-          onChange={(e) => setPhoneRaw(e.target.value)}
-          className="w-full rounded-lg bg-slate-950/80 border border-slate-700 focus:border-emerald-500/60 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 px-3 py-2 font-mono text-slate-100 placeholder:text-slate-600"
-        />
-        <div className="mt-1 flex justify-between text-[11px] text-slate-500">
-          <span>Formatted: <span className="text-slate-300 font-mono">{phoneFormatted || '—'}</span></span>
-          <span>{normalized && `normalized: ${normalized}`}</span>
-        </div>
-      </div>
-      {phoneRaw && (
-        <PhoneInfoCard origin={phoneOrigin} formatted={phoneFormatted || phoneRaw} valid={phoneValid} />
-      )}
+      <label className="block text-xs uppercase tracking-wider text-emerald-300/80 mb-2">
+        Trace phone number location
+      </label>
+      <input
+        type="tel"
+        inputMode="tel"
+        autoComplete="off"
+        placeholder="+62 812 3456 7890  atau  0812-3456-7890"
+        value={phoneRaw}
+        onChange={(e) => setPhoneRaw(e.target.value)}
+        className="w-full rounded-lg bg-slate-950/80 border border-slate-700 focus:border-emerald-500/60 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 px-3 py-2 font-mono text-slate-100 placeholder:text-slate-600"
+      />
+      {phoneRaw && <PhoneInfoCard lookup={lookup} />}
     </section>
   )
 }
@@ -278,10 +267,11 @@ function Footer() {
   return (
     <footer className="pt-6 border-t border-slate-900 text-[11px] text-slate-500 space-y-1">
       <p>
-        BTS reference data and phone-prefix region mapping are <b>illustrative samples</b>, not authoritative.
-        Indonesian mobile numbers are <b>portable nationally</b> — prefix-to-city estimates are unreliable for mobile.
+        Carrier & line type diambil dari <b>AbstractAPI Phone Validation</b> (real data).
+        City/province untuk nomor mobile adalah estimasi prefix — nomor mobile Indonesia
+        bersifat portable secara nasional.
       </p>
-      <p>Built with React 19 · Vite · Tailwind CSS · Framer Motion · libphonenumber-js</p>
+      <p>Built with React 19 · Vite · Tailwind CSS · Framer Motion · libphonenumber-js · AbstractAPI</p>
     </footer>
   )
 }
